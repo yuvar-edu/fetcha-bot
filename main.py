@@ -238,24 +238,38 @@ async def fetch_tweets():
                         print(f"Rate limit reached for Grok API. Waiting {wait_time:.2f} seconds")
                         await asyncio.sleep(wait_time)
                     
-                    analysis = grok_analyze(tweet.text, GROK_API_KEY)
+                    batch_tweets.append({'id': str(tweet.id), 'text': tweet.text, 'username': username, 'name': name})
+
+            # Process batch after collecting all new tweets
+            if batch_tweets:
+                try:
+                    tweet_texts = [{'id': t['id'], 'text': t['text']} for t in batch_tweets]
+                    analyses = grok_analyze([t['text'] for t in batch_tweets], GROK_API_KEY)
                     rate_limiter.log_request('grok')
-                    print(f"Grok API analysis result: {analysis}")
-                    processed_tweets.add(str(tweet.id))
-                    new_tweets_found = True
-                    if analysis.get('relevant', False):
-                        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Relevant tweet detected: {tweet.id}")
-                        formatted_msg = (
-                            f"🚨 **{analysis['headline']}**\n\n"
-                            f"**{name} (@{username})**\n"
-                            f"{tweet.text}\n\n"
-                            f"📈 Sentiment: {analysis['sentiment']} ({analysis['score']}/10)\n"
-                            f"📉 Impact: {analysis['impact']}\n"
-                            f"🧭 Direction: {analysis['direction']}\n"
-                            f"💰 Assets: {', '.join(analysis['assets'])}\n\n"
-                            f"🔗 Original tweet: https://twitter.com/{username}/status/{tweet.id}"
-                        )
-                        await send_to_telegram(formatted_msg)
+
+                    for i, analysis in enumerate(analyses):
+                        tweet_data = batch_tweets[i]
+                        print(f"Grok API analysis result for {tweet_data['id']}: {analysis}")
+                        processed_tweets.add(tweet_data['id'])
+                        new_tweets_found = True
+
+                        if analysis.get('relevant', False):
+                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Relevant tweet detected: {tweet_data['id']}")
+                            formatted_msg = (
+                                f"🚨 **{analysis['headline']}**\n\n"
+                                f"**{tweet_data['name']} (@{tweet_data['username']})**\n"
+                                f"{tweet_data['text']}\n\n"
+                                f"📈 Sentiment: {analysis['sentiment']} ({analysis['score']}/10)\n"
+                                f"📉 Impact: {analysis['impact']}\n"
+                                f"🧭 Direction: {analysis['direction']}\n"
+                                f"💰 Assets: {', '.join(analysis['assets'])}\n\n"
+                                f"🔗 Original tweet: https://twitter.com/{tweet_data['username']}/status/{tweet_data['id']}"
+                            )
+                            await send_to_telegram(formatted_msg)
+
+                except Exception as e:
+                    bot_stats.errors_count += 1
+                    print(f"Batch processing error: {str(e)}")
         
         except tweepy.HTTPException as e:
             if e.response.status_code == 429:
@@ -340,6 +354,24 @@ async def main():
     # Create Telegram application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("stats", stats_command))
+
+    # Initialize Telegram bot
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    async def handle_stats(update, context):
+        stats_text = (
+            f"📊 Bot Statistics:\n"
+            f"Messages Sent: {bot_stats.messages_sent}\n"
+            f"Tweets Processed: {bot_stats.tweets_processed}\n"
+            f"Errors Count: {bot_stats.errors_count}"
+        )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=stats_text
+        )
+
+    # Add command handler
+    application.add_handler(CommandHandler('stats', handle_stats))
 
     # Initial checks
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Performing initial tweet check")
