@@ -15,5 +15,8 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
 TELEGRAM_TOPIC_ID = os.getenv('TELEGRAM_TOPIC_ID')
 
+# Finnhub Configuration
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+
 # Scheduler Configuration
 POLLING_INTERVAL_MINUTES = 1

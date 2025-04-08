@@ -10,10 +10,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import (
     TWITTER_BEARER_TOKEN,
     GROK_API_KEY,
+    FINNHUB_API_KEY,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHANNEL_ID,
     TELEGRAM_TOPIC_ID
 )
+
+import finnhub
 from dotenv import load_dotenv
 import json
 from pathlib import Path
@@ -25,6 +28,7 @@ class BotStats:
     def __init__(self):
         self.start_time = datetime.now()
         self.tweets_processed = 0
+        self.news_processed = 0
         self.messages_sent = 0
         self.errors_count = 0
 
@@ -40,6 +44,7 @@ class BotStats:
             f"📊 Bot Statistics\n\n"
             f"⏱ Uptime: {self.get_uptime()}\n"
             f"🐦 Tweets Processed: {self.tweets_processed}\n"
+            f"📰 News Processed: {self.news_processed}\n"
             f"📨 Messages Sent: {self.messages_sent}\n"
             f"⚠️ Errors: {self.errors_count}\n"
         )
@@ -56,10 +61,64 @@ INFLUENCERS = {
     'APompliano': 'Anthony Pompliano',
     'RaoulGMI': 'Raoul Pal',
     'chamath': 'Chamath Palihapitiya',
-    'garyvee': 'Gary Vaynerchuk'
+    'garyvee': 'Gary Vaynerchuk',
+    'realDonaldTrump': 'Donald Trump'
 }
 
 PROCESSED_TWEETS_FILE = Path(__file__).parent / 'processed_tweets.json'
+PROCESSED_NEWS_FILE = Path(__file__).parent / 'processed_news.json'
+
+async def fetch_news():
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduled news check", flush=True)
+    
+    try:
+        processed_news = set(json.loads(PROCESSED_NEWS_FILE.read_text())) if PROCESSED_NEWS_FILE.exists() else set()
+    except Exception as e:
+        print(f"Error loading processed news: {e}")
+        processed_news = set()
+
+    finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
+    categories = ['general', 'forex', 'crypto', 'merger']
+    new_news_found = False
+
+    for category in categories:
+        try:
+            news = finnhub_client.general_news(category, min_id=0)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(news)} news articles in {category}", flush=True)
+
+            for article in news:
+                if str(article['id']) in processed_news:
+                    continue
+
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing NEW news ID: {article['id']}")
+                bot_stats.news_processed += 1
+                analysis = grok_analyze(article['summary'], GROK_API_KEY)
+                processed_news.add(str(article['id']))
+                new_news_found = True
+
+                if analysis.get('relevant', False):
+                    formatted_msg = (
+                        f"📰 **{analysis['headline']}**\n\n"
+                        f"**{article['source']} News** ({category.title()})\n"
+                        f"{article['summary']}\n\n"
+                        f"📈 Sentiment: {analysis['sentiment']} ({analysis['score']}/10)\n"
+                        f"📉 Impact: {analysis['impact']}\n"
+                        f"🧭 Direction: {analysis['direction']}\n"
+                        f"💰 Assets: {', '.join(analysis['assets'])}\n\n"
+                        f"🔗 Full article: {article['url']}"
+                    )
+                    await send_to_telegram(formatted_msg)
+
+        except Exception as e:
+            bot_stats.errors_count += 1
+            print(f"Error processing {category} news: {str(e)}")
+
+    if new_news_found:
+        try:
+            PROCESSED_NEWS_FILE.write_text(json.dumps(list(processed_news)))
+        except Exception as e:
+            print(f"Error saving processed news: {e}")
+
 
 async def fetch_tweets():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduled tweet check", flush=True)
@@ -192,10 +251,12 @@ if __name__ == '__main__':
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduler with 1-minute intervals")
     scheduler.start()
     
-    # Start Telegram polling after scheduler
-    # Initial immediate check before starting polling
+        # Start Telegram polling after scheduler
+    # Initial immediate checks before starting polling
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Performing initial tweet check")
     fetch_tweets()
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Performing initial news check")
+    fetch_news()
     
     # Remove direct fetch_tweets() call
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting Telegram polling")
