@@ -159,7 +159,7 @@ async def fetch_tweets():
     )
     
     # Add near top with other constants
-    CRITICAL_INFLUENCERS = ['elonmusk', 'saylor', 'CathieDWood']
+    CRITICAL_INFLUENCERS = ['elonmusk', 'saylor', 'CathieDWood', 'brian_armstrong', 'cz_binance', 'VitalikButerin', 'APompliano', 'RaoulGMI', 'chamath', 'garyvee', 'realDonaldTrump']
     MAX_RETRIES = 3
     BASE_DELAY = 1.5
     CIRCUIT_BREAKER_THRESHOLD = 5
@@ -187,7 +187,7 @@ async def fetch_tweets():
                         client.search_recent_tweets,
                         query=query,
                         tweet_fields=['created_at', 'public_metrics', 'referenced_tweets', 'author_id'],
-                        max_results=100,
+                        max_results=20,
                         expansions=['author_id']
                     )
                     
