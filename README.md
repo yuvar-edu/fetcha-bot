@@ -20,7 +20,7 @@ A Twitter monitoring bot that tracks crypto influencers and sends analyzed updat
 ## Installation
 1. Clone repository
 ```bash
-git clone https://github.com/yourusername/fetcha-bot.git
+git clone https://github.com/yuvar-edu/fetcha-bot.git
 cd fetcha-bot
 ```
 2. Install dependencies
