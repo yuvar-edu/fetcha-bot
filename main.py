@@ -303,23 +303,22 @@ def analyze_tweet(tweet):
 
 async def send_to_telegram(message):
     try:
-        print(f'Attempting to send message to channel: {TELEGRAM_CHANNEL_ID}')
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
-        if not TELEGRAM_CHANNEL_ID.startswith('-'):
-            raise ValueError('Invalid Telegram channel ID format')
+        
+        # Auto-add channel ID prefix if missing
+        if not TELEGRAM_CHANNEL_ID.startswith('-100'):
+            TELEGRAM_CHANNEL_ID = f'-100{TELEGRAM_CHANNEL_ID}'
 
         message_obj = await bot.send_message(
             chat_id=TELEGRAM_CHANNEL_ID,
             message_thread_id=int(TELEGRAM_TOPIC_ID),
-            text=message,
-            disable_notification=False
+            text=message
         )
-        print(f'Message sent successfully. Message ID: {message_obj.message_id}')
         bot_stats.messages_sent += 1
     except Exception as e:
-        bot_stats.errors_count += 1
-        print(f'Telegram send error: {str(e)}')
+        print(f'Telegram error: {repr(e)}')
+        if 'Forbidden: bot is not a member' in str(e):
+            print('Error: Bot needs to be added to channel as admin with post permissions')
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Get API rate limit information
@@ -352,12 +351,9 @@ async def main():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduler with 1-minute intervals")
     scheduler.start()
 
-    # Create Telegram application
+    # Create single Telegram application instance
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("stats", stats_command))
-
-    # Initialize Telegram bot
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     async def handle_stats(update, context):
         stats_text = (
