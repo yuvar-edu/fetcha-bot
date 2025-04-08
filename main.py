@@ -158,6 +158,8 @@ async def fetch_tweets():
         wait_on_rate_limit=True
     )
     
+    batch_tweets = []  # Initialize empty list
+    
     # Add near top with other constants
     CRITICAL_INFLUENCERS = ['elonmusk', 'saylor', 'CathieDWood', 'brian_armstrong', 'cz_binance', 'VitalikButerin', 'APompliano', 'RaoulGMI', 'chamath', 'garyvee', 'realDonaldTrump']
     MAX_RETRIES = 3
@@ -283,7 +285,6 @@ async def fetch_tweets():
         except Exception as e:
             bot_stats.errors_count += 1
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Telegram send error: {e}")
-            print(f"Failed to send message: {message}")
             print(f"Error details: {str(e)}")
 
     if new_tweets_found:
