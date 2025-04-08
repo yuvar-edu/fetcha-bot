@@ -83,7 +83,7 @@ async def fetch_news():
 
     for category in categories:
         try:
-            news = finnhub_client.general_news(category, min_id=0)
+            news = await asyncio.to_thread(finnhub_client.general_news, category, 0)
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(news)} news articles in {category}", flush=True)
 
             for article in news:
@@ -140,12 +140,12 @@ async def fetch_tweets():
             await asyncio.sleep(60)
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing influencer: {username} ({name})", flush=True)
         try:
-            user = client.get_user(username=username)
+            user = await asyncio.to_thread(client.get_user, username=username)
             if not user.data:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] User not found: {username}")
                 continue
                 
-            tweets = client.get_users_tweets(
+            tweets = await asyncio.to_thread(
+                client.get_users_tweets,
                 user.data.id,
                 tweet_fields=['created_at', 'public_metrics', 'referenced_tweets'],
                 exclude=['retweets', 'replies'],
@@ -236,10 +236,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=stats_text)
 
-if __name__ == '__main__':
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("stats", stats_command))
-    # Initialize scheduler before starting polling
+async def main():
+    # Initialize scheduler
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         fetch_tweets, 
@@ -250,14 +248,20 @@ if __name__ == '__main__':
     )
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduler with 1-minute intervals")
     scheduler.start()
-    
-        # Start Telegram polling after scheduler
-    # Initial immediate checks before starting polling
+
+    # Create Telegram application
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application.add_handler(CommandHandler("stats", stats_command))
+
+    # Initial checks
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Performing initial tweet check")
-    fetch_tweets()
+    await fetch_tweets()
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Performing initial news check")
-    fetch_news()
-    
-    # Remove direct fetch_tweets() call
+    await fetch_news()
+
+    # Start polling
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting Telegram polling")
-    application.run_polling()
+    await application.run_polling()
+
+if __name__ == '__main__':
+    asyncio.run(main())
