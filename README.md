@@ -4,14 +4,16 @@ A Twitter monitoring bot that tracks crypto influencers and sends analyzed updat
 
 ## Features
 - 🐦 Monitors 10+ influencers on Twitter/X
+- 📰 Gets and updates latest market headlines
 - 🔍 Uses Grok AI for tweet analysis
 - 📊 Tracks bot statistics including uptime and message metrics
-- ⏰ Automated checks every 5 minutes
+- ⏰ Automated checks every 1 minute
 - 📨 Telegram notifications for relevant updates
 
 ## Requirements
 - Python 3.10+
 - Twitter Developer Account
+- Finnhub API Key
 - Grok API Key
 - Telegram Bot Token
 
@@ -27,18 +29,7 @@ pip install -r requirements.txt
 ```
 
 ## Configuration
-Create `.env` file with these variables:
-```ini
-TWITTER_CONSUMER_KEY=your_key
-TWITTER_CONSUMER_SECRET=your_secret
-TWITTER_ACCESS_TOKEN=your_token
-TWITTER_ACCESS_TOKEN_SECRET=your_token_secret
-TWITTER_BEARER_TOKEN=your_bearer_token
-GROK_API_KEY=your_grok_key
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHANNEL_ID=your_channel_id
-TELEGRAM_TOPIC_ID=your_topic_id
-```
+Use `.env.example` file to configure the bot:
 
 ## Usage
 ```bash
@@ -60,3 +51,4 @@ python main.py
 - Raoul Pal
 - Chamath Palihapitiya
 - Gary Vaynerchuk
+- Donald Trump
