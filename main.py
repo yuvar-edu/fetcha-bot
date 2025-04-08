@@ -182,13 +182,27 @@ async def fetch_tweets():
                 
                 try:
                     user = await asyncio.to_thread(client.get_user, username=username)
+                    query = ' OR '.join([f'from:{username}' for username in INFLUENCERS.keys()])
                     tweets = await asyncio.to_thread(
-                        client.get_users_tweets,
-                        user.data.id,
-                        tweet_fields=['created_at', 'public_metrics', 'referenced_tweets'],
-                        exclude=['retweets', 'replies'],
-                        max_results=5
+                        client.search_recent_tweets,
+                        query=query,
+                        tweet_fields=['created_at', 'public_metrics', 'referenced_tweets', 'author_id'],
+                        max_results=100,
+                        expansions=['author_id']
                     )
+                    
+                    if not tweets.data:
+                        return
+                    
+                    users = {u.id: u for u in tweets.includes.get('users', [])}
+                    
+                    for tweet in tweets.data:
+                        user = users.get(tweet.author_id)
+                        if not user or user.username not in INFLUENCERS:
+                            continue
+                        
+                        username = user.username
+                        name = INFLUENCERS[username]
                     break
                 except tweepy.HTTPException as inner_e:
                     remaining = int(inner_e.response.headers.get('x-rate-limit-remaining', 1))
@@ -316,9 +330,9 @@ async def main():
     scheduler.add_job(
         fetch_tweets, 
         'interval', 
-        minutes=30,  # Run every 30 minutes (twice per hour)
+        minutes=5,
         next_run_time=datetime.now(),
-        misfire_grace_time=300
+        misfire_grace_time=60
     )
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduler with 1-minute intervals")
     scheduler.start()
