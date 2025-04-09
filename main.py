@@ -322,18 +322,20 @@ def analyze_tweet(tweet):
 
 async def send_to_telegram(message):
     try:
-        # Validate Telegram configuration once during initialization
-        if not hasattr(send_to_telegram, 'channel_id_verified'):
+        # Initialize static variables if not already set
+        if not hasattr(send_to_telegram, 'initialized'):
             if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID]):
                 print("ERROR: Missing Telegram configuration - check environment variables")
                 return
             
-            # Format channel ID once
-            send_to_telegram.channel_id = TELEGRAM_CHANNEL_ID
-            if send_to_telegram.channel_id.isdigit() and not send_to_telegram.channel_id.startswith('-100'):
-                send_to_telegram.channel_id = f'-100{send_to_telegram.channel_id}'
+            # Format and store channel ID
+            channel_id = str(TELEGRAM_CHANNEL_ID)
+            if channel_id.isdigit() and not channel_id.startswith('-100'):
+                channel_id = f'-100{channel_id}'
             
-            send_to_telegram.channel_id_verified = True
+            # Store as static variables
+            send_to_telegram.channel_id = channel_id
+            send_to_telegram.initialized = True
 
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
         message_obj = await bot.send_message(
