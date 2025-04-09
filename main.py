@@ -213,8 +213,8 @@ async def fetch_tweets():
                         exclude=['retweets', 'replies']
                     )
                     # Safely handle rate limit headers
-                    headers = getattr(response, 'headers', {})
-                    rate_limiter.update_from_headers('twitter', headers)
+                    if hasattr(response, 'headers'):
+                        rate_limiter.update_from_headers('twitter', response.headers)
                     tweets = response.data
                     
                     # Update error tracking
@@ -236,10 +236,10 @@ async def fetch_tweets():
                     break
                 except tweepy.HTTPException as inner_e:
                     # Safely handle rate limit headers from error response
-                    headers = getattr(inner_e.response, 'headers', {})
-                    rate_limiter.update_from_headers('twitter', headers)
+                    if hasattr(inner_e, 'response') and hasattr(inner_e.response, 'headers'):
+                        rate_limiter.update_from_headers('twitter', inner_e.response.headers)
                     remaining = rate_limiter.get_remaining_requests('twitter')
-                    reset = rate_limiter.last_reset['twitter'] + rate_limiter.rate_limits['twitter']['window'] - time.time()
+                    reset = rate_limiter.last_reset.get('twitter', time.time()) + rate_limiter.rate_limits['twitter']['window'] - time.time()
                     
                     if remaining == 0:
                         wait_time = max(reset - time.time(), 60)
