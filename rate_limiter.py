@@ -13,7 +13,7 @@ class RateLimiter:
             },
             'finnhub': {
                 'window': 60,  # 1 minute in seconds
-                'max_requests': 30,  # Finnhub's rate limit
+                'max_requests': 60,  # Finnhub's actual API limit (60/min)
                 'remaining': 30
             },
             'grok': {
@@ -59,35 +59,32 @@ class RateLimiter:
             - can_request: bool indicating if request can be made
             - wait_time: seconds to wait if can_request is False
         """
+        now = time.time()
         if api not in self.requests:
             self.requests[api] = []
 
-        self._cleanup_old_requests(api)
-
-        # Calculate available requests based on actual window
-        window_start = self.last_reset.get(api, time.time())
-        window_end = window_start + self.rate_limits[api]['window']
-        now = time.time()
-        
         # Reset window if expired
+        window_end = self.last_reset.get(api, 0) + self.rate_limits[api]['window']
         if now > window_end:
             self.rate_limits[api]['remaining'] = self.rate_limits[api]['max_requests']
             self.last_reset[api] = now
-            window_start = now
-            window_end = now + self.rate_limits[api]['window']
 
-        available_requests = self.rate_limits[api]['remaining']
-        current_requests = len(self.requests[api])
+        if self.rate_limits[api]['remaining'] <= 0:
+            base_wait = window_end - now
+            jitter = base_wait * random.uniform(0.1, 0.3)
+            return False, max(base_wait + jitter, 0)
 
-        # If we're under the limit
-        if current_requests < available_requests:
-            self.requests[api].append(now)
-            return True, 0
+        # Log successful check
+        self.requests[api].append(now)
+        self.rate_limits[api]['remaining'] -= 1
+        return True, 0
 
-        # Calculate wait time
-        oldest_request = self.requests[api][0]
-        wait_time = (oldest_request + self.rate_limits[api]['window']) - now
-        return False, max(wait_time, 0)
+    def update_from_headers(self, api: str, headers: dict) -> None:
+        """Update rate limits from API response headers"""
+        if 'x-rate-limit-remaining' in headers:
+            self.rate_limits[api]['remaining'] = int(headers['x-rate-limit-remaining'])
+        if 'x-rate-limit-reset' in headers:
+            self.last_reset[api] = int(headers['x-rate-limit-reset'])
 
     def get_remaining_requests(self, api: str) -> int:
         """Get remaining requests for the specified API."""
@@ -106,4 +103,5 @@ class RateLimiter:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
               f"{api.title()} API Status: "
               f"Remaining: {self.get_remaining_requests(api)}, "
-              f"Requests in window: {len(self.requests.get(api, []))}")
+              f"Requests in window: {len(self.requests.get(api, []))}\n"
+              f"Next reset timestamp: {self.last_reset.get(api, 0) + self.rate_limits[api]['window']}")

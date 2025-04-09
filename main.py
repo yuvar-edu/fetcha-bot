@@ -96,7 +96,12 @@ async def fetch_news():
 
     for category in categories:
         try:
-            news = await asyncio.to_thread(finnhub_client.general_news, category, 0)
+            response = await asyncio.to_thread(finnhub_client.general_news, category, 0)
+            rate_limiter.update_from_headers('finnhub', {
+                'x-rate-limit-remaining': response.headers.get('x-ratelimit-remaining'),
+                'x-rate-limit-reset': response.headers.get('x-ratelimit-reset')
+            } if hasattr(response, 'headers') else {})
+            news = response
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(news)} news articles in {category}", flush=True)
 
             for article in news:
@@ -109,7 +114,8 @@ async def fetch_news():
                 can_request, wait_time = await rate_limiter.check_rate_limit('grok')
                 if not can_request:
                     print(f"Rate limit reached for Grok API. Waiting {wait_time:.2f} seconds")
-                    await asyncio.sleep(wait_time)
+                    jitter = wait_time * random.uniform(0.1, 0.3)
+                    await asyncio.sleep(wait_time + jitter)
                 
                 analysis = grok_analyze(article['summary'], GROK_API_KEY)
                 rate_limiter.log_request('grok')
@@ -199,7 +205,7 @@ async def fetch_tweets():
                     # Get last processed tweet ID for pagination
                     since_id = max((int(t) for t in processed_tweets if t.isdigit()), default=None)
                     
-                    tweets = await asyncio.to_thread(
+                    response = await asyncio.to_thread(
                         client.get_users_tweets,
                         id=user.data.id,
                         tweet_fields=['created_at', 'public_metrics', 'referenced_tweets'],
@@ -207,6 +213,11 @@ async def fetch_tweets():
                         since_id=since_id,
                         exclude=['retweets', 'replies']
                     )
+                    rate_limiter.update_from_headers('twitter', {
+                        'x-rate-limit-remaining': response.headers.get('x-rate-limit-remaining'),
+                        'x-rate-limit-reset': response.headers.get('x-rate-limit-reset')
+                    })
+                    tweets = response.data
                     
                     # Update error tracking
                     error_counts[username] = error_counts.get(username, 0)
@@ -226,13 +237,18 @@ async def fetch_tweets():
                         name = INFLUENCERS[username]
                     break
                 except tweepy.HTTPException as inner_e:
-                    remaining = int(inner_e.response.headers.get('x-rate-limit-remaining', 1))
-                    reset = int(inner_e.response.headers.get('x-rate-limit-reset', 60))
+                    rate_limiter.update_from_headers('twitter', {
+                        'x-rate-limit-remaining': inner_e.response.headers.get('x-rate-limit-remaining'),
+                        'x-rate-limit-reset': inner_e.response.headers.get('x-rate-limit-reset')
+                    })
+                    remaining = rate_limiter.get_remaining_requests('twitter')
+                    reset = rate_limiter.last_reset['twitter'] + rate_limiter.rate_limits['twitter']['window'] - time.time()
                     
                     if remaining == 0:
                         wait_time = max(reset - time.time(), 60)
                         print(f"Rate limit exhausted. Waiting {wait_time} seconds")
-                        await asyncio.sleep(wait_time)
+                        jitter = wait_time * random.uniform(0.1, 0.3)
+                    await asyncio.sleep(wait_time + jitter)
                     else:
                         retries += 1
                         print(f"Attempt {retries}/{MAX_RETRIES} - waiting {delay:.2f}s")
@@ -258,7 +274,8 @@ async def fetch_tweets():
                     can_request, wait_time = await rate_limiter.check_rate_limit('grok')
                     if not can_request:
                         print(f"Rate limit reached for Grok API. Waiting {wait_time:.2f} seconds")
-                        await asyncio.sleep(wait_time)
+                        jitter = wait_time * random.uniform(0.1, 0.3)
+                    await asyncio.sleep(wait_time + jitter)
                     
                     batch_tweets.append({'id': str(tweet.id), 'text': tweet.text, 'username': username, 'name': name})
 
@@ -377,11 +394,12 @@ async def main():
     # Initialize scheduler
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
-        fetch_tweets, 
-        'interval', 
-        minutes=5,
+        fetch_tweets,
+        'interval',
+        minutes=15,
+        jitter=60,
         next_run_time=datetime.now(),
-        misfire_grace_time=60
+        misfire_grace_time=120
     )
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduler with 1-minute intervals")
     scheduler.start()
