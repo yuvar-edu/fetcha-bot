@@ -215,18 +215,19 @@ async def fetch_tweets():
                     # Safely handle rate limit headers
                     if hasattr(response, 'headers'):
                         rate_limiter.update_from_headers('twitter', response.headers)
-                    tweets = response.data
+                    tweets = response.data if response else []
                     
                     # Update error tracking
                     error_counts[username] = error_counts.get(username, 0)
                     
-                    if not tweets or not tweets.data:
+                    if not tweets:
                         print(f"No tweets found for {username}")
+                        continue
                         continue
                     
                     users = {u.id: u for u in tweets.includes.get('users', [])} if tweets.includes else {}
                     
-                    for tweet in tweets.data:
+                    for tweet in tweets:
                         user = users.get(tweet.author_id)
                         if not user or user.username not in INFLUENCERS:
                             continue
@@ -257,11 +258,11 @@ async def fetch_tweets():
             if user is None or not user.data:
                 continue
             
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(tweets.data) if tweets and tweets.data else 0} tweets from {username}", flush=True)
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(tweets)} tweets from {username}", flush=True)
             
-            if tweets and tweets.data:
-                influencer_last_ids[username] = tweets.data[0].id  # Store most recent ID
-                for tweet in tweets.data:
+            if tweets:
+                influencer_last_ids[username] = tweets[0].id  # Store most recent ID
+                for tweet in tweets:
                     if str(tweet.id) in processed_tweets:
                         continue
                     
