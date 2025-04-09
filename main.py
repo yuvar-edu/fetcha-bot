@@ -241,7 +241,7 @@ async def fetch_tweets():
             # Reset error count on success
             error_counts[username] = 0
             
-            if not user.data:
+            if user is None or not user.data:
                 continue
             
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(tweets.data) if tweets and tweets.data else 0} tweets from {username}", flush=True)
