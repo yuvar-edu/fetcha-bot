@@ -166,12 +166,18 @@ async def fetch_tweets():
     BASE_DELAY = 1.5
     CIRCUIT_BREAKER_THRESHOLD = 5
 
+    influencer_last_ids = {}
     new_tweets_found = False
     # Add near other initializations
     error_counts = {}
     
     # Update API call blocks with full retry wrapping
     for idx, (username, name) in enumerate(INFLUENCERS.items()):
+        # Add progressive delay between influencers
+        base_delay = idx * 1.2
+        jitter = random.uniform(0.8, 1.2)
+        await asyncio.sleep(base_delay * jitter)
+        
         if error_counts.get(username, 0) >= CIRCUIT_BREAKER_THRESHOLD:
             print(f"Skipping {username} due to circuit breaker")
             continue
@@ -184,14 +190,20 @@ async def fetch_tweets():
                 
                 try:
                     user = await asyncio.to_thread(client.get_user, username=username)
-                    query = ' OR '.join([f'from:{username}' for username in INFLUENCERS.keys()])
+                    # Get last processed tweet ID for pagination
+                    since_id = max((int(t) for t in processed_tweets if t.isdigit()), default=None)
+                    
                     tweets = await asyncio.to_thread(
-                        client.search_recent_tweets,
-                        query=query,
-                        tweet_fields=['created_at', 'public_metrics', 'referenced_tweets', 'author_id'],
-                        max_results=20,
-                        expansions=['author_id']
+                        client.get_users_tweets,
+                        id=user.data.id,
+                        tweet_fields=['created_at', 'public_metrics', 'referenced_tweets'],
+                        max_results=50,
+                        since_id=since_id,
+                        exclude=['retweets', 'replies']
                     )
+                    
+                    # Update error tracking
+                    error_counts[username] = error_counts.get(username, 0)
                     
                     if not tweets.data:
                         return
@@ -228,6 +240,7 @@ async def fetch_tweets():
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(tweets.data) if tweets and tweets.data else 0} tweets from {username}", flush=True)
             
             if tweets and tweets.data:
+                influencer_last_ids[username] = tweets.data[0].id  # Store most recent ID
                 for tweet in tweets.data:
                     if str(tweet.id) in processed_tweets:
                         continue
@@ -281,11 +294,17 @@ async def fetch_tweets():
                 continue
             else:
                 bot_stats.errors_count += 1
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error processing {username}: {e}")
+                error_counts[username] = error_counts.get(username, 0) + 1
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error processing {username}: {e} (Error count: {error_counts[username]}/{CIRCUIT_BREAKER_THRESHOLD})")
+                if username == 'cz_binance':
+                    print(f"DEBUG: cz_binance API error - Status: {e.response.status_code}")
         except Exception as e:
             bot_stats.errors_count += 1
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Telegram send error: {e}")
             print(f"Error details: {str(e)}")
+
+    # Add cooldown after processing batch
+    await asyncio.sleep(random.uniform(2.0, 4.0))
 
     if new_tweets_found:
         try:
@@ -303,15 +322,23 @@ def analyze_tweet(tweet):
 
 async def send_to_telegram(message):
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        
-        # Auto-add channel ID prefix if missing
-        if not TELEGRAM_CHANNEL_ID.startswith('-100'):
-            TELEGRAM_CHANNEL_ID = f'-100{TELEGRAM_CHANNEL_ID}'
+        # Validate Telegram configuration once during initialization
+        if not hasattr(send_to_telegram, 'channel_id_verified'):
+            if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID]):
+                print("ERROR: Missing Telegram configuration - check environment variables")
+                return
+            
+            # Format channel ID once
+            send_to_telegram.channel_id = TELEGRAM_CHANNEL_ID
+            if send_to_telegram.channel_id.isdigit() and not send_to_telegram.channel_id.startswith('-100'):
+                send_to_telegram.channel_id = f'-100{send_to_telegram.channel_id}'
+            
+            send_to_telegram.channel_id_verified = True
 
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         message_obj = await bot.send_message(
-            chat_id=TELEGRAM_CHANNEL_ID,
-            message_thread_id=int(TELEGRAM_TOPIC_ID),
+            chat_id=send_to_telegram.channel_id,
+            message_thread_id=int(TELEGRAM_TOPIC_ID) if TELEGRAM_TOPIC_ID else None,
             text=message
         )
         bot_stats.messages_sent += 1
@@ -354,21 +381,6 @@ async def main():
     # Create single Telegram application instance
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("stats", stats_command))
-
-    async def handle_stats(update, context):
-        stats_text = (
-            f"📊 Bot Statistics:\n"
-            f"Messages Sent: {bot_stats.messages_sent}\n"
-            f"Tweets Processed: {bot_stats.tweets_processed}\n"
-            f"Errors Count: {bot_stats.errors_count}"
-        )
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=stats_text
-        )
-
-    # Add command handler
-    application.add_handler(CommandHandler('stats', handle_stats))
 
     # Initial checks
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Performing initial tweet check")
