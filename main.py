@@ -248,7 +248,7 @@ async def fetch_tweets():
                         wait_time = max(reset - time.time(), 60)
                         print(f"Rate limit exhausted. Waiting {wait_time} seconds")
                         jitter = wait_time * random.uniform(0.1, 0.3)
-                    await asyncio.sleep(wait_time + jitter)
+                        await asyncio.sleep(wait_time + jitter)
                     else:
                         retries += 1
                         print(f"Attempt {retries}/{MAX_RETRIES} - waiting {delay:.2f}s")
