@@ -162,7 +162,7 @@ async def fetch_tweets():
 
     client = tweepy.Client(
         bearer_token=TWITTER_BEARER_TOKEN,
-        wait_on_rate_limit=True
+        wait_on_rate_limit=False  # Disable built-in waiting
     )
     
     batch_tweets = []  # Initialize empty list
@@ -214,7 +214,7 @@ async def fetch_tweets():
                     )
                     # Safely handle rate limit headers
                     if hasattr(response, 'headers'):
-                        rate_limiter.update_from_headers('twitter', response.headers)
+                        rate_limiter.update_from_headers('twitter', dict(response.headers))
                     tweets = response.data if response else []
                     
                     # Update error tracking
@@ -222,64 +222,23 @@ async def fetch_tweets():
                     
                     if not tweets:
                         print(f"No tweets found for {username}")
-                        continue
+                        continue  # Remove duplicate continue
                         continue
                     
                     users = {u.id: u for u in tweets.includes.get('users', [])} if tweets.includes else {}
                     
                     for tweet in tweets:
-                        user = users.get(tweet.author_id)
-                        if not user or user.username not in INFLUENCERS:
+                        if str(tweet.id) in processed_tweets:
                             continue
                         
-                        username = user.username
-                        name = INFLUENCERS[username]
-                    break
-                except tweepy.HTTPException as inner_e:
-                    # Safely handle rate limit headers from error response
-                    if hasattr(inner_e, 'response') and hasattr(inner_e.response, 'headers'):
-                        rate_limiter.update_from_headers('twitter', inner_e.response.headers)
-                    remaining = rate_limiter.get_remaining_requests('twitter')
-                    reset = rate_limiter.last_reset.get('twitter', time.time()) + rate_limiter.rate_limits['twitter']['window'] - time.time()
-                    
-                    if remaining == 0:
-                        wait_time = max(reset - time.time(), 60)
-                        print(f"Rate limit exhausted. Waiting {wait_time} seconds")
-                        jitter = wait_time * random.uniform(0.1, 0.3)
-                        await asyncio.sleep(wait_time + jitter)
-                    else:
-                        retries += 1
-                        print(f"Attempt {retries}/{MAX_RETRIES} - waiting {delay:.2f}s")
-                        await asyncio.sleep(delay)
-            
-            # Reset error count on success
-            error_counts[username] = 0
-            
-            if user is None or not user.data:
-                continue
-            
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(tweets)} tweets from {username}", flush=True)
-            
-            if tweets:
-                influencer_last_ids[username] = tweets[0].id  # Store most recent ID
-                for tweet in tweets:
-                    if str(tweet.id) in processed_tweets:
-                        continue
-                    
-                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing NEW tweet ID: {tweet.id}")
-                    bot_stats.tweets_processed += 1
-                    # Check Grok API rate limit
-                    can_request, wait_time = await rate_limiter.check_rate_limit('grok')
-                    if not can_request:
-                        print(f"Rate limit reached for Grok API. Waiting {wait_time:.2f} seconds")
-                        jitter = wait_time * random.uniform(0.1, 0.3)
-                    await asyncio.sleep(wait_time + jitter)
-                    
-                    batch_tweets.append({'id': str(tweet.id), 'text': tweet.text, 'username': username, 'name': name})
+                        print(f"Processing NEW tweet ID: {tweet.id}")
+                        batch_tweets.append({'id': str(tweet.id), 'text': tweet.text, 'username': username, 'name': name})
 
-            # Process batch after collecting all new tweets
-            if batch_tweets:
-                try:
+                    # Process batch immediately after collection
+                    if batch_tweets:
+                        current_batch = batch_tweets.copy()
+                        batch_tweets.clear()
+
                     tweet_texts = [{'id': t['id'], 'text': t['text']} for t in batch_tweets]
                     analyses = grok_analyze([t['text'] for t in batch_tweets], GROK_API_KEY)
                     rate_limiter.log_request('grok')
@@ -293,7 +252,8 @@ async def fetch_tweets():
                         if analysis.get('relevant', False):
                             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Relevant tweet detected: {tweet_data['id']}")
                             formatted_msg = (
-                                f"🚨 **{analysis['headline']}**\n\n"
+                                f"🚨 *{escape_markdown(analysis['headline'], version=2)}*\n\n"
+                                f"*{escape_markdown(tweet_data['name'], version=2)}*"
                                 f"**{tweet_data['name']} (@{tweet_data['username']})**\n"
                                 f"{tweet_data['text']}\n\n"
                                 f"📈 Sentiment: {analysis['sentiment']} ({analysis['score']}/10)\n"
@@ -333,8 +293,10 @@ async def fetch_tweets():
     if new_tweets_found:
         try:
             PROCESSED_TWEETS_FILE.write_text(json.dumps(list(processed_tweets)))
+            print(f"Saved {len(processed_tweets)} processed tweets")
         except Exception as e:
-            print(f"Error saving processed tweets: {e}")
+            print(f"Error saving tweets: {e}")
+            processed_tweets = set()
 
 def analyze_tweet(tweet):
     # AI analysis implementation
@@ -355,7 +317,12 @@ async def send_to_telegram(message):
             if channel_id.isdigit() and not channel_id.startswith('-100'):
                 channel_id = f'-100{channel_id}'
             send_to_telegram.channel_id = channel_id
-        
+            # Validate channel access
+            try:
+                await send_to_telegram.bot.get_chat(chat_id=channel_id)
+            except Exception as e:
+                print(f"Telegram channel access error: {e}")
+
         escaped_message = escape_markdown(message, version=2)
         message_obj = await send_to_telegram.bot.send_message(
             chat_id=send_to_telegram.channel_id,
