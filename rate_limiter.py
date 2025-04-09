@@ -81,11 +81,32 @@ class RateLimiter:
         return True, 0
 
     def update_from_headers(self, api: str, headers: dict) -> None:
-        """Update rate limits from API response headers"""
-        if 'x-rate-limit-remaining' in headers:
-            self.rate_limits[api]['remaining'] = int(headers['x-rate-limit-remaining'])
-        if 'x-rate-limit-reset' in headers:
-            self.last_reset[api] = int(headers['x-rate-limit-reset'])
+        """Update rate limits from API response headers with safe fallbacks."""
+        if not headers:
+            return
+            
+        try:
+            if 'x-rate-limit-remaining' in headers:
+                remaining = headers['x-rate-limit-remaining']
+                if remaining is not None:
+                    self.rate_limits[api]['remaining'] = int(remaining)
+            elif 'x-ratelimit-remaining' in headers:  # Handle alternate header name
+                remaining = headers['x-ratelimit-remaining']
+                if remaining is not None:
+                    self.rate_limits[api]['remaining'] = int(remaining)
+                    
+            if 'x-rate-limit-reset' in headers:
+                reset = headers['x-rate-limit-reset']
+                if reset is not None:
+                    self.last_reset[api] = int(reset)
+            elif 'x-ratelimit-reset' in headers:  # Handle alternate header name
+                reset = headers['x-ratelimit-reset']
+                if reset is not None:
+                    self.last_reset[api] = int(reset)
+        except (ValueError, TypeError, KeyError) as e:
+            # If any conversion fails, keep using existing values
+            print(f"Error updating rate limits from headers: {str(e)}")
+            return
 
     def get_remaining_requests(self, api: str) -> int:
         """Get remaining requests for the specified API."""

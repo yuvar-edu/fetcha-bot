@@ -97,10 +97,9 @@ async def fetch_news():
     for category in categories:
         try:
             response = await asyncio.to_thread(finnhub_client.general_news, category, 0)
-            rate_limiter.update_from_headers('finnhub', {
-                'x-rate-limit-remaining': response.headers.get('x-ratelimit-remaining'),
-                'x-rate-limit-reset': response.headers.get('x-ratelimit-reset')
-            } if hasattr(response, 'headers') else {})
+            # Safely handle rate limit headers
+            headers = getattr(response, 'headers', {})
+            rate_limiter.update_from_headers('finnhub', headers)
             news = response
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(news)} news articles in {category}", flush=True)
 
@@ -213,10 +212,9 @@ async def fetch_tweets():
                         since_id=since_id,
                         exclude=['retweets', 'replies']
                     )
-                    rate_limiter.update_from_headers('twitter', {
-                        'x-rate-limit-remaining': response.headers.get('x-rate-limit-remaining'),
-                        'x-rate-limit-reset': response.headers.get('x-rate-limit-reset')
-                    })
+                    # Safely handle rate limit headers
+                    headers = getattr(response, 'headers', {})
+                    rate_limiter.update_from_headers('twitter', headers)
                     tweets = response.data
                     
                     # Update error tracking
@@ -237,10 +235,9 @@ async def fetch_tweets():
                         name = INFLUENCERS[username]
                     break
                 except tweepy.HTTPException as inner_e:
-                    rate_limiter.update_from_headers('twitter', {
-                        'x-rate-limit-remaining': inner_e.response.headers.get('x-rate-limit-remaining'),
-                        'x-rate-limit-reset': inner_e.response.headers.get('x-rate-limit-reset')
-                    })
+                    # Safely handle rate limit headers from error response
+                    headers = getattr(inner_e.response, 'headers', {})
+                    rate_limiter.update_from_headers('twitter', headers)
                     remaining = rate_limiter.get_remaining_requests('twitter')
                     reset = rate_limiter.last_reset['twitter'] + rate_limiter.rate_limits['twitter']['window'] - time.time()
                     
