@@ -3,6 +3,7 @@ import random
 import tweepy
 import time
 import asyncio
+import traceback
 from datetime import datetime
 from grok_api import grok_analyze
 from telegram import Bot, Update
@@ -17,6 +18,7 @@ from config import (
     TELEGRAM_TOPIC_ID
 )
 from rate_limiter import RateLimiter
+from telegram.helpers import escape_markdown
 
 # Initialize rate limiter
 rate_limiter = RateLimiter()
@@ -190,6 +192,10 @@ async def fetch_tweets():
                 
                 try:
                     user = await asyncio.to_thread(client.get_user, username=username)
+                    if not user or not user.data:
+                        print(f"Failed to retrieve user data for {username}")
+                        continue
+
                     # Get last processed tweet ID for pagination
                     since_id = max((int(t) for t in processed_tweets if t.isdigit()), default=None)
                     
@@ -205,10 +211,11 @@ async def fetch_tweets():
                     # Update error tracking
                     error_counts[username] = error_counts.get(username, 0)
                     
-                    if not tweets.data:
-                        return
+                    if not tweets or not tweets.data:
+                        print(f"No tweets found for {username}")
+                        continue
                     
-                    users = {u.id: u for u in tweets.includes.get('users', [])}
+                    users = {u.id: u for u in tweets.includes.get('users', [])} if tweets.includes else {}
                     
                     for tweet in tweets.data:
                         user = users.get(tweet.author_id)
@@ -297,10 +304,12 @@ async def fetch_tweets():
                 error_counts[username] = error_counts.get(username, 0) + 1
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error processing {username}: {e} (Error count: {error_counts[username]}/{CIRCUIT_BREAKER_THRESHOLD})")
                 if username == 'cz_binance':
-                    print(f"DEBUG: cz_binance API error - Status: {e.response.status_code}")
+                    print(f"Error processing {username}: {e}\nTraceback: {traceback.format_exc()}")
+                    if username == 'cz_binance':
+                        print(f"DEBUG: cz_binance API error - Status: {e.response.status_code}")
         except Exception as e:
             bot_stats.errors_count += 1
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Telegram send error: {e}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Telegram send error: {e}\n{traceback.format_exc()}")
             print(f"Error details: {str(e)}")
 
     # Add cooldown after processing batch
@@ -322,26 +331,22 @@ def analyze_tweet(tweet):
 
 async def send_to_telegram(message):
     try:
-        # Initialize static variables if not already set
-        if not hasattr(send_to_telegram, 'initialized'):
-            if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID]):
-                print("ERROR: Missing Telegram configuration - check environment variables")
-                return
+        # Initialize static bot instance
+        if not hasattr(send_to_telegram, 'bot'):
+            send_to_telegram.bot = Bot(token=TELEGRAM_BOT_TOKEN)
             
-            # Format and store channel ID
+            # Validate and format channel ID
             channel_id = str(TELEGRAM_CHANNEL_ID)
             if channel_id.isdigit() and not channel_id.startswith('-100'):
                 channel_id = f'-100{channel_id}'
-            
-            # Store as static variables
             send_to_telegram.channel_id = channel_id
-            send_to_telegram.initialized = True
-
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        message_obj = await bot.send_message(
+        
+        escaped_message = escape_markdown(message, version=2)
+        message_obj = await send_to_telegram.bot.send_message(
             chat_id=send_to_telegram.channel_id,
             message_thread_id=int(TELEGRAM_TOPIC_ID) if TELEGRAM_TOPIC_ID else None,
-            text=message
+            text=escaped_message,
+            parse_mode='MarkdownV2'
         )
         bot_stats.messages_sent += 1
     except Exception as e:
@@ -357,6 +362,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats_text = (
         f"📊 Bot Statistics\n\n"
         f"🤖 Performance\n"
+        f"- Uptime: {bot_stats.get_uptime()}\n"
         f"- Tweets processed: {bot_stats.tweets_processed}\n"
         f"- Messages sent: {bot_stats.messages_sent}\n"
         f"- Errors encountered: {bot_stats.errors_count}\n"
