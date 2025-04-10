@@ -23,8 +23,8 @@ Fetcha Bot is an automated financial monitoring system that tracks tweets from i
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/fetcha-bot2.git
-   cd fetcha-bot2
+   git clone https://github.com/yuvar-edu/fetcha-bot.git
+   cd fetcha-bot
    ```
 
 2. Create a virtual environment and activate it:
@@ -81,9 +81,6 @@ The bot supports the following commands in Telegram:
   - `user_ids.json` - Cached Twitter user IDs
   - `processed_ids.json` - Tracking for processed content
 
-## License
-
-[MIT License](LICENSE)
 
 ## Contributing
 
