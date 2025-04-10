@@ -1,54 +1,90 @@
 # Fetcha Bot
 
-A Twitter monitoring bot that tracks crypto influencers and sends analyzed updates to Telegram.
+Fetcha Bot is an automated financial monitoring system that tracks tweets from influential figures in the finance and crypto space, as well as financial news, analyzes their content for market relevance, and delivers real-time notifications to a Telegram channel.
 
 ## Features
-- 🐦 Monitors 10+ influencers on Twitter/X
-- 📰 Gets and updates latest market headlines
-- 🔍 Uses Grok AI for tweet analysis
-- 📊 Tracks bot statistics including uptime and message metrics
-- ⏰ Automated checks every 1 minute
-- 📨 Telegram notifications for relevant updates
+
+- **Twitter Monitoring**: Tracks tweets from specified financial influencers
+- **Financial News Tracking**: Monitors crypto and forex news from Finnhub
+- **AI-Powered Analysis**: Uses AI to analyze content for market sentiment and relevance
+- **Real-time Notifications**: Sends relevant updates to a configured Telegram channel
+- **Scheduled Checks**: Automatically checks for new content at regular intervals
+- **Statistics Tracking**: Maintains stats on processed content and relevance
 
 ## Requirements
+
 - Python 3.10+
-- Twitter Developer Account
-- Finnhub API Key
-- Grok API Key
-- Telegram Bot Token
+- Twitter API access (Bearer Token)
+- Finnhub API key
+- Grok API key (or compatible AI service)
+- Telegram Bot Token and Channel
 
 ## Installation
-1. Clone repository
-```bash
-git clone https://github.com/yuvar-edu/fetcha-bot.git
-cd fetcha-bot
-```
-2. Install dependencies
-```bash
-pip install -r requirements.txt
-```
+
+1. Clone the repository:
+   ```
+   git clone https://github.com/yourusername/fetcha-bot2.git
+   cd fetcha-bot2
+   ```
+
+2. Create a virtual environment and activate it:
+   ```
+   python -m venv venv
+   # On Windows
+   venv\Scripts\activate
+   # On macOS/Linux
+   source venv/bin/activate
+   ```
+
+3. Install dependencies:
+   ```
+   pip install tweepy finnhub-python python-telegram-bot python-dotenv apscheduler openai
+   ```
 
 ## Configuration
-Use `.env.example` file to configure the bot:
+
+1. Rename `.env.example` to `.env` and fill in your API keys and Telegram Bot Token and Channel.
+
+2. Customize the list of influencers to monitor in `main.py`
 
 ## Usage
-```bash
+
+Start the bot by running:
+```
 python main.py
 ```
 
-📊 View statistics in Telegram with `/stats` command
+The bot will:
+1. Initialize connections to all required APIs
+2. Resolve Twitter usernames to user IDs
+3. Start scheduled checks for new tweets and news
+4. Send relevant updates to your Telegram channel
 
-🔧 The bot automatically checks for new tweets every 5 minutes
+## Telegram Commands
 
-## Supported Influencers
-- Elon Musk
-- Michael Saylor
-- Cathie Wood
-- Brian Armstrong
-- Changpeng Zhao
-- Vitalik Buterin
-- Anthony Pompliano
-- Raoul Pal
-- Chamath Palihapitiya
-- Gary Vaynerchuk
-- Donald Trump
+The bot supports the following commands in Telegram:
+- `/stats` - Display monitoring statistics
+
+## Project Structure
+
+- `main.py` - Main application entry point and scheduler
+- `api/` - API client modules
+  - `twitter.py` - Twitter API integration
+  - `finnhub.py` - Finnhub API for financial news
+  - `analysis.py` - AI-powered text analysis
+  - `telegram.py` - Telegram bot for notifications
+- `utils/` - Utility modules
+  - `logging_config.py` - Logging configuration
+  - `data.py` - Data persistence utilities
+  - `stats.py` - Statistics tracking
+- `data/` - Data storage directory
+  - `user_ids.json` - Cached Twitter user IDs
+  - `processed_ids.json` - Tracking for processed content
+
+## License
+
+[MIT License](LICENSE)
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.

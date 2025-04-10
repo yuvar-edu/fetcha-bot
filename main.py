@@ -1,387 +1,219 @@
 import os
-import random
-import tweepy
-import time
 import asyncio
-import traceback
-from datetime import datetime
-from grok_api import grok_analyze
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from config import (
-    TWITTER_BEARER_TOKEN,
-    GROK_API_KEY,
-    FINNHUB_API_KEY,
-    TELEGRAM_BOT_TOKEN,
-    TELEGRAM_CHANNEL_ID,
-    TELEGRAM_TOPIC_ID
-)
-from rate_limiter import RateLimiter
-from telegram.helpers import escape_markdown
-
-# Initialize rate limiter
-rate_limiter = RateLimiter()
-
-import finnhub
+import sys
+import logging
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-import json
-from pathlib import Path
-from grok_api import grok_analyze
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# Import utility modules
+from utils.logging_config import setup_logging
+from utils.data import load_user_ids, save_user_ids, load_processed_ids, save_processed_ids
+from utils.stats import stats
+
+# Import API modules
+from api.twitter import TwitterAPI
+from api.analysis import AnalysisAPI
+from api.finnhub import FinnhubAPI
+from api.telegram import TelegramAPI
+
+# Load environment variables
 load_dotenv()
 
-class BotStats:
-    def __init__(self):
-        self.start_time = datetime.now()
-        self.tweets_processed = 0
-        self.news_processed = 0
-        self.messages_sent = 0
-        self.errors_count = 0
+# Setup logging
+logger = setup_logging()
 
-    def get_uptime(self):
-        delta = datetime.now() - self.start_time
-        days = delta.days
-        hours, remainder = divmod(delta.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return f"{days}d {hours}h {minutes}m {seconds}s"
+# Check for required environment variables
+required_env_vars = [
+    'TWITTER_BEARER_TOKEN',
+    'FINNHUB_API_KEY',
+    'GROK_API_KEY',
+    'TELEGRAM_BOT_TOKEN',
+    'TELEGRAM_CHAT_ID',
+    'TELEGRAM_TOPIC_ID'
+]
 
-    def format_stats(self):
-        return (
-            f"📊 Bot Statistics\n\n"
-            f"⏱ Uptime: {self.get_uptime()}\n"
-            f"🐦 Tweets Processed: {self.tweets_processed}\n"
-            f"📰 News Processed: {self.news_processed}\n"
-            f"📨 Messages Sent: {self.messages_sent}\n"
-            f"⚠️ Errors: {self.errors_count}\n"
-        )
+missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+if missing_vars:
+    logger.error(f"Missing environment variables: {', '.join(missing_vars)}")
+    sys.exit(1)
 
-bot_stats = BotStats()
-
-INFLUENCERS = {
-    'elonmusk': 'Elon Musk',
-    'saylor': 'Michael Saylor',
-    'CathieDWood': 'Cathie Wood',
-    'brian_armstrong': 'Brian Armstrong',
-    'cz_binance': 'Changpeng Zhao',
-    'VitalikButerin': 'Vitalik Buterin',
-    'APompliano': 'Anthony Pompliano',
-    'RaoulGMI': 'Raoul Pal',
-    'chamath': 'Chamath Palihapitiya',
-    'garyvee': 'Gary Vaynerchuk',
-    'realDonaldTrump': 'Donald Trump'
-}
-
-PROCESSED_TWEETS_FILE = Path(__file__).parent / 'processed_tweets.json'
-PROCESSED_NEWS_FILE = Path(__file__).parent / 'processed_news.json'
-
-async def fetch_news():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduled news check", flush=True)
-    
-    try:
-        processed_news = set(json.loads(PROCESSED_NEWS_FILE.read_text())) if PROCESSED_NEWS_FILE.exists() else set()
-    except Exception as e:
-        print(f"Error loading processed news: {e}")
-        processed_news = set()
-        
-    # Check Finnhub rate limit before making request
-    can_request, wait_time = await rate_limiter.check_rate_limit('finnhub')
-    if not can_request:
-        print(f"Rate limit reached for Finnhub API. Waiting {wait_time:.2f} seconds")
-        await asyncio.sleep(wait_time)
-
-    finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
-    categories = ['general', 'forex', 'crypto', 'merger']
-    new_news_found = False
-
-    for category in categories:
-        try:
-            response = await asyncio.to_thread(finnhub_client.general_news, category, 0)
-            # Safely handle rate limit headers
-            headers = getattr(response, 'headers', {})
-            rate_limiter.update_from_headers('finnhub', headers)
-            news = response
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Retrieved {len(news)} news articles in {category}", flush=True)
-
-            for article in news:
-                if str(article['id']) in processed_news:
-                    continue
-
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Processing NEW news ID: {article['id']}")
-                bot_stats.news_processed += 1
-                # Check Grok API rate limit
-                can_request, wait_time = await rate_limiter.check_rate_limit('grok')
-                if not can_request:
-                    print(f"Rate limit reached for Grok API. Waiting {wait_time:.2f} seconds")
-                    jitter = wait_time * random.uniform(0.1, 0.3)
-                    await asyncio.sleep(wait_time + jitter)
-                
-                analysis = grok_analyze(article['summary'], GROK_API_KEY)
-                rate_limiter.log_request('grok')
-                processed_news.add(str(article['id']))
-                new_news_found = True
-
-                if analysis.get('relevant', False):
-                    formatted_msg = (
-                        f"📰 **{analysis['headline']}**\n\n"
-                        f"**{article['source']} News** ({category.title()})\n"
-                        f"{article['summary']}\n\n"
-                        f"📈 Sentiment: {analysis['sentiment']} ({analysis['score']}/10)\n"
-                        f"📉 Impact: {analysis['impact']}\n"
-                        f"🧭 Direction: {analysis['direction']}\n"
-                        f"💰 Assets: {', '.join(analysis['assets'])}\n\n"
-                        f"🔗 Full article: {article['url']}"
-                    )
-                    await send_to_telegram(formatted_msg)
-
-        except Exception as e:
-            bot_stats.errors_count += 1
-            print(f"Error processing {category} news: {str(e)}")
-
-    if new_news_found:
-        try:
-            PROCESSED_NEWS_FILE.write_text(json.dumps(list(processed_news)))
-        except Exception as e:
-            print(f"Error saving processed news: {e}")
-
-
-async def fetch_tweets():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduled tweet check", flush=True)
-    
-    # Check Twitter rate limit before starting
-    can_request, wait_time = await rate_limiter.check_rate_limit('twitter')
-    if not can_request:
-        print(f"Rate limit reached for Twitter API. Waiting {wait_time:.2f} seconds")
-        await asyncio.sleep(wait_time)
-    
-    try:
-        processed_tweets = set(json.loads(PROCESSED_TWEETS_FILE.read_text())) if PROCESSED_TWEETS_FILE.exists() else set()
-    except Exception as e:
-        print(f"Error loading processed tweets: {e}")
-        processed_tweets = set()
-
-    client = tweepy.Client(
-        bearer_token=TWITTER_BEARER_TOKEN,
-        wait_on_rate_limit=False  # Disable built-in waiting
+# Initialize API clients
+try:
+    twitter_api = TwitterAPI(bearer_token=os.getenv('TWITTER_BEARER_TOKEN'))
+    analysis_api = AnalysisAPI(api_key=os.getenv('GROK_API_KEY'), base_url="https://api.x.ai/v1")
+    finnhub_api = FinnhubAPI(api_key=os.getenv('FINNHUB_API_KEY'))
+    telegram_api = TelegramAPI(
+        bot_token=os.getenv('TELEGRAM_BOT_TOKEN'),
+        chat_id=os.getenv('TELEGRAM_CHAT_ID'),
+        topic_id=os.getenv('TELEGRAM_TOPIC_ID')
     )
-    
-    batch_tweets = []  # Initialize empty list
-    
-    # Add near top with other constants
-    CRITICAL_INFLUENCERS = ['elonmusk', 'saylor', 'CathieDWood', 'brian_armstrong', 'cz_binance', 'VitalikButerin', 'APompliano', 'RaoulGMI', 'chamath', 'garyvee', 'realDonaldTrump']
-    MAX_RETRIES = 3
-    BASE_DELAY = 1.5
-    CIRCUIT_BREAKER_THRESHOLD = 5
+    logger.info("API clients initialized successfully")
+except Exception as e:
+    logger.error(f"Error initializing API clients: {e}")
+    sys.exit(1)
 
-    influencer_last_ids = {}
-    new_tweets_found = False
-    # Add near other initializations
-    error_counts = {}
+# Define influencers
+influencers = [
+    'elonmusk', 'michaelsaylor', 'CathieDWood', 'brian_armstrong',
+    'cz_binance', 'VitalikButerin', 'APompliano', 'RaoulGMI',
+    'chamath', 'garyvee', 'realDonaldTrump'
+]
+
+# Load user IDs and processed IDs
+user_id_map = load_user_ids()
+processed_ids = load_processed_ids()
+stats.processed_news_ids = processed_ids['news']
+stats.processed_tweet_ids = processed_ids['tweets']
+
+# Resolve user IDs for influencers
+user_id_map = twitter_api.resolve_user_ids(influencers, user_id_map)
+
+async def check_tweets():
+    """
+    Check for new tweets from influencers and process them.
+    """
+    stats.last_tweet_check = datetime.now(timezone.utc)
     
-    # Update API call blocks with full retry wrapping
-    for idx, (username, name) in enumerate(INFLUENCERS.items()):
-        # Add progressive delay between influencers
-        base_delay = idx * 1.2
-        jitter = random.uniform(0.8, 1.2)
-        await asyncio.sleep(base_delay * jitter)
-        
-        if error_counts.get(username, 0) >= CIRCUIT_BREAKER_THRESHOLD:
-            print(f"Skipping {username} due to circuit breaker")
-            continue
-        
+    for screen_name, user_id in user_id_map.items():
         try:
-            retries = 0
-            while retries < MAX_RETRIES:
-                jitter = random.uniform(0.5, 1.5)
-                delay = BASE_DELAY * (2 ** retries) * jitter
-                
-                try:
-                    user = await asyncio.to_thread(client.get_user, username=username)
-                    if not user or not user.data:
-                        print(f"Failed to retrieve user data for {username}")
-                        continue
+            logger.info(f"Checking tweets for {screen_name} (ID: {user_id})")
+            tweets = twitter_api.get_recent_tweets(user_id, minutes=30)
+            logger.info(f"Found {len(tweets)} tweets for {screen_name}")
 
-                    # Get last processed tweet ID for pagination
-                    since_id = max((int(t) for t in processed_tweets if t.isdigit()), default=None)
-                    
-                    response = await asyncio.to_thread(
-                        client.get_users_tweets,
-                        id=user.data.id,
-                        tweet_fields=['created_at', 'public_metrics', 'referenced_tweets'],
-                        max_results=50,
-                        since_id=since_id,
-                        exclude=['retweets', 'replies']
-                    )
-                    # Safely handle rate limit headers
-                    if hasattr(response, 'headers'):
-                        rate_limiter.update_from_headers('twitter', dict(response.headers))
-                    tweets = response.data if response else []
-                    
-                    # Update error tracking
-                    error_counts[username] = error_counts.get(username, 0)
-                    
-                    if not tweets:
-                        print(f"No tweets found for {username}")
-                        continue  # Remove duplicate continue
-                        continue
-                    
-                    users = {u.id: u for u in tweets.includes.get('users', [])} if tweets.includes else {}
-                    
-                    for tweet in tweets:
-                        if str(tweet.id) in processed_tweets:
-                            continue
-                        
-                        print(f"Processing NEW tweet ID: {tweet.id}")
-                        batch_tweets.append({'id': str(tweet.id), 'text': tweet.text, 'username': username, 'name': name})
-
-                    # Process batch immediately after collection
-                    if batch_tweets:
-                        current_batch = batch_tweets.copy()
-                        batch_tweets.clear()
-
-                    tweet_texts = [{'id': t['id'], 'text': t['text']} for t in batch_tweets]
-                    analyses = grok_analyze([t['text'] for t in batch_tweets], GROK_API_KEY)
-                    rate_limiter.log_request('grok')
-
-                    for i, analysis in enumerate(analyses):
-                        tweet_data = batch_tweets[i]
-                        print(f"Grok API analysis result for {tweet_data['id']}: {analysis}")
-                        processed_tweets.add(tweet_data['id'])
-                        new_tweets_found = True
-
-                        if analysis.get('relevant', False):
-                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Relevant tweet detected: {tweet_data['id']}")
-                            formatted_msg = (
-                                f"🚨 *{escape_markdown(analysis['headline'], version=2)}*\n\n"
-                                f"*{escape_markdown(tweet_data['name'], version=2)}*"
-                                f"**{tweet_data['name']} (@{tweet_data['username']})**\n"
-                                f"{tweet_data['text']}\n\n"
-                                f"📈 Sentiment: {analysis['sentiment']} ({analysis['score']}/10)\n"
-                                f"📉 Impact: {analysis['impact']}\n"
-                                f"🧭 Direction: {analysis['direction']}\n"
-                                f"💰 Assets: {', '.join(analysis['assets'])}\n\n"
-                                f"🔗 Original tweet: https://twitter.com/{tweet_data['username']}/status/{tweet_data['id']}"
-                            )
-                            await send_to_telegram(formatted_msg)
-
-                except Exception as e:
-                    bot_stats.errors_count += 1
-                    print(f"Batch processing error: {str(e)}")
-        
-        except tweepy.HTTPException as e:
-            if e.response.status_code == 429:
-                retry_after = int(e.response.headers.get('Retry-After', 300))
-                print(f"Rate limited - waiting {retry_after} seconds")
-                await asyncio.sleep(retry_after)
+            if not tweets:
                 continue
-            else:
-                bot_stats.errors_count += 1
-                error_counts[username] = error_counts.get(username, 0) + 1
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Error processing {username}: {e} (Error count: {error_counts[username]}/{CIRCUIT_BREAKER_THRESHOLD})")
-                if username == 'cz_binance':
-                    print(f"Error processing {username}: {e}\nTraceback: {traceback.format_exc()}")
-                    if username == 'cz_binance':
-                        print(f"DEBUG: cz_binance API error - Status: {e.response.status_code}")
+
+            for tweet in tweets:
+                # Skip already processed tweets
+                if str(tweet['id']) in stats.processed_tweet_ids:
+                    logger.debug(f"Skipping already processed tweet {tweet['id']} from {screen_name}")
+                    continue
+                    
+                # Add to processed set
+                stats.processed_tweet_ids.add(str(tweet['id']))
+                stats.tweets_processed += 1
+                
+                logger.debug(f"Processing tweet {tweet['id']} from {screen_name}")
+                analysis = await analysis_api.analyze_text(tweet['text'])
+
+                # Only process if analysis exists and relevant flag is True
+                if analysis and analysis['relevant']:
+                    stats.tweets_relevant += 1
+                    await telegram_api.send_tweet_alert(
+                        screen_name=screen_name,
+                        tweet_text=tweet['text'],
+                        tweet_id=str(tweet['id']),
+                        analysis=analysis
+                    )
+                else:
+                    logger.debug(f"Irrelevant tweet skipped: {tweet['id']} (Reason: {'No analysis' if not analysis else 'Not relevant'})")
         except Exception as e:
-            bot_stats.errors_count += 1
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Telegram send error: {e}\n{traceback.format_exc()}")
-            print(f"Error details: {str(e)}")
+            logger.error(f"Twitter check error for {screen_name}: {e}", exc_info=True)
 
-    # Add cooldown after processing batch
-    await asyncio.sleep(random.uniform(2.0, 4.0))
-
-    if new_tweets_found:
-        try:
-            PROCESSED_TWEETS_FILE.write_text(json.dumps(list(processed_tweets)))
-            print(f"Saved {len(processed_tweets)} processed tweets")
-        except Exception as e:
-            print(f"Error saving tweets: {e}")
-            processed_tweets = set()
-
-def analyze_tweet(tweet):
-    # AI analysis implementation
-    analysis = grok_analyze(
-        text=tweet.text,
-        api_key=GROK_API_KEY
-    )
-    return analysis
-
-async def send_to_telegram(message):
-    try:
-        # Initialize static bot instance
-        if not hasattr(send_to_telegram, 'bot'):
-            send_to_telegram.bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            
-            # Validate and format channel ID
-            channel_id = str(TELEGRAM_CHANNEL_ID)
-            if channel_id.isdigit() and not channel_id.startswith('-100'):
-                channel_id = f'-100{channel_id}'
-            send_to_telegram.channel_id = channel_id
-            # Validate channel access
-            try:
-                await send_to_telegram.bot.get_chat(chat_id=channel_id)
-            except Exception as e:
-                print(f"Telegram channel access error: {e}")
-
-        escaped_message = escape_markdown(message, version=2)
-        message_obj = await send_to_telegram.bot.send_message(
-            chat_id=send_to_telegram.channel_id,
-            message_thread_id=int(TELEGRAM_TOPIC_ID) if TELEGRAM_TOPIC_ID else None,
-            text=escaped_message,
-            parse_mode='MarkdownV2'
-        )
-        bot_stats.messages_sent += 1
-    except Exception as e:
-        print(f'Telegram error: {repr(e)}')
-        if 'Forbidden: bot is not a member' in str(e):
-            print('Error: Bot needs to be added to channel as admin with post permissions')
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Get API rate limit information
-    twitter_remaining = rate_limiter.get_remaining_requests('twitter')
-    grok_remaining = rate_limiter.get_remaining_requests('grok')
+async def check_news():
+    """
+    Check for new news articles and process them.
+    """
+    stats.last_news_check = datetime.now(timezone.utc)
+    categories = ['forex', 'crypto', 'merger']
     
-    stats_text = (
-        f"📊 Bot Statistics\n\n"
-        f"🤖 Performance\n"
-        f"- Uptime: {bot_stats.get_uptime()}\n"
-        f"- Tweets processed: {bot_stats.tweets_processed}\n"
-        f"- Messages sent: {bot_stats.messages_sent}\n"
-        f"- Errors encountered: {bot_stats.errors_count}\n"
-        f"- Uptime: {str(datetime.now() - bot_stats.start_time).split('.')[0]}\n\n"
-        f"📈 API Status\n"
-        f"- Twitter API: {twitter_remaining}/180 requests remaining\n"
-        f"- Grok API: {grok_remaining}/60 requests remaining\n"
-    )
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=stats_text)
+    try:
+        for category in categories:
+            recent_news = finnhub_api.get_recent_news(category, minutes=5)
+            
+            if not recent_news:
+                continue
 
-async def main():
-    # Initialize scheduler
+            for article in recent_news:
+                # Skip already processed articles
+                article_id = article.get('id')
+                if article_id in stats.processed_news_ids:
+                    logger.debug(f"Skipping already processed article {article_id}")
+                    continue
+                
+                # Add the article ID to the processed set before analysis
+                stats.processed_news_ids.add(article_id)
+                stats.news_processed += 1
+                
+                # Create analysis text from headline and summary
+                analysis_text = f"{article.get('headline', '')} {article.get('summary', '')}"
+                analysis = await analysis_api.analyze_text(analysis_text)
+                
+                # Only process if analysis exists and relevant flag is True
+                if analysis and analysis.get('relevant', True):
+                    stats.news_relevant += 1
+                    await telegram_api.send_news_alert(article, analysis)
+                else:
+                    logger.debug(f"Irrelevant news skipped: {article.get('headline')} (Reason: {'No analysis' if not analysis else 'Not relevant'})")
+    except Exception as e:
+        logger.error(f"News check error: {e}", exc_info=True)
+    finally:
+        # Save processed IDs after each news check
+        save_processed_ids(stats.processed_news_ids, stats.processed_tweet_ids)
+
+async def main_async():
+    """
+    Main async function to run the application.
+    """
+    # Build Telegram application
+    application = telegram_api.build_application()
+    
+    # Test Telegram connection
+    if not await telegram_api.test_connection():
+        logger.error("Telegram connection test failed. Exiting.")
+        return 1
+    
+    # Initialize the scheduler
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        fetch_tweets,
-        'interval',
-        minutes=15,
-        jitter=60,
-        next_run_time=datetime.now(),
-        misfire_grace_time=120
-    )
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting scheduler with 1-minute intervals")
+    scheduler.add_job(check_tweets, 'interval', minutes=30)
+    scheduler.add_job(check_news, 'interval', minutes=5)
     scheduler.start()
+    
+    # Start the application without blocking
+    await application.initialize()
+    await application.start()
+    
+    try:
+        # Keep the application running
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Received signal to terminate")
+    finally:
+        logger.info("Shutting down scheduler...")
+        scheduler.shutdown()
+        # Save processed IDs before shutting down
+        save_processed_ids(stats.processed_news_ids, stats.processed_tweet_ids)
+        # Properly shutdown the application
+        await application.stop()
+        await application.shutdown()
+    
+    return 0
 
-    # Create single Telegram application instance
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("stats", stats_command))
+def main():
+    """
+    Main entry point for the application.
+    """
+    try:
+        # Create new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run the async main function
+        exit_code = loop.run_until_complete(main_async())
+        
+        # Clean up
+        loop.close()
+        return exit_code
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+        return 0
+    except Exception as e:
+        logger.error(f"Critical error: {e}", exc_info=True)
+        return 1
+    finally:
+        logger.info("Exiting application")
 
-    # Initial checks
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Performing initial tweet check")
-    await fetch_tweets()
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Performing initial news check")
-    await fetch_news()
-
-    # Start polling
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting Telegram polling")
-    await application.run_polling()
-
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__":
+    sys.exit(main())
