@@ -2,9 +2,11 @@ import os
 import asyncio
 import sys
 import logging
+import tweepy
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 # Import utility modules
 from utils.logging_config import setup_logging
@@ -73,43 +75,90 @@ async def check_tweets():
     """
     Check for new tweets from influencers and process them.
     """
-    stats.last_tweet_check = datetime.now(timezone.utc)
+    start_time = datetime.now(timezone.utc)
+    stats.last_tweet_check = start_time
+    logger.info("Starting tweet check process")
     
-    for screen_name, user_id in user_id_map.items():
-        try:
-            logger.info(f"Checking tweets for {screen_name} (ID: {user_id})")
-            tweets = twitter_api.get_recent_tweets(user_id, minutes=30)
-            logger.info(f"Found {len(tweets)} tweets for {screen_name}")
-
-            if not tweets:
-                continue
-
-            for tweet in tweets:
-                # Skip already processed tweets
-                if str(tweet['id']) in stats.processed_tweet_ids:
-                    logger.debug(f"Skipping already processed tweet {tweet['id']} from {screen_name}")
-                    continue
-                    
-                # Add to processed set
-                stats.processed_tweet_ids.add(str(tweet['id']))
-                stats.tweets_processed += 1
+    # Process tweets in batches to avoid long-running operations
+    processed_count = 0
+    error_count = 0
+    max_errors = 3  # Maximum number of consecutive errors before aborting
+    rate_limit_errors = 0
+    max_rate_limit_errors = 5  # Maximum number of rate limit errors before backing off
+    
+    try:
+        # Randomize the order of influencers to distribute API calls
+        import random
+        influencer_items = list(user_id_map.items())
+        random.shuffle(influencer_items)
+        
+        for screen_name, user_id in influencer_items:
+            if error_count >= max_errors:
+                logger.warning(f"Aborting tweet check after {error_count} consecutive errors")
+                break
                 
-                logger.debug(f"Processing tweet {tweet['id']} from {screen_name}")
-                analysis = await analysis_api.analyze_text(tweet['text'])
+            if rate_limit_errors >= max_rate_limit_errors:
+                logger.warning(f"Rate limit threshold reached ({rate_limit_errors} errors). Pausing tweet check for this cycle.")
+                break
+                
+            try:
+                # Add a variable delay between API calls to different influencers to avoid rate limiting
+                # Longer delay as we process more influencers
+                delay = random.uniform(3, 6)  # Random delay between 3-6 seconds
+                logger.debug(f"Waiting {delay:.1f}s before checking tweets for {screen_name}")
+                await asyncio.sleep(delay)
+                
+                logger.info(f"Checking tweets for {screen_name} (ID: {user_id})")
+                tweets = twitter_api.get_recent_tweets(user_id, minutes=60)
+                logger.info(f"Found {len(tweets)} tweets for {screen_name}")
+                error_count = 0  # Reset error count on success
 
-                # Only process if analysis exists and relevant flag is True
-                if analysis and analysis['relevant']:
-                    stats.tweets_relevant += 1
-                    await telegram_api.send_tweet_alert(
-                        screen_name=screen_name,
-                        tweet_text=tweet['text'],
-                        tweet_id=str(tweet['id']),
-                        analysis=analysis
-                    )
-                else:
-                    logger.debug(f"Irrelevant tweet skipped: {tweet['id']} (Reason: {'No analysis' if not analysis else 'Not relevant'})")
-        except Exception as e:
-            logger.error(f"Twitter check error for {screen_name}: {e}", exc_info=True)
+                if not tweets:
+                    continue
+
+                for tweet in tweets:
+                    # Skip already processed tweets
+                    if str(tweet['id']) in stats.processed_tweet_ids:
+                        logger.debug(f"Skipping already processed tweet {tweet['id']} from {screen_name}")
+                        continue
+                        
+                    # Add to processed set
+                    stats.processed_tweet_ids.add(str(tweet['id']))
+                    stats.tweets_processed += 1
+                    processed_count += 1
+                    
+                    logger.debug(f"Processing tweet {tweet['id']} from {screen_name}")
+                    analysis = await analysis_api.analyze_text(tweet['text'])
+
+                    # Only process if analysis exists and relevant flag is True
+                    if analysis and analysis.get('relevant', False):
+                        stats.tweets_relevant += 1
+                        await telegram_api.send_tweet_alert(
+                            screen_name=screen_name,
+                            tweet_text=tweet['text'],
+                            tweet_id=str(tweet['id']),
+                            analysis=analysis
+                        )
+                    else:
+                        logger.debug(f"Irrelevant tweet skipped: {tweet['id']} (Reason: {'No analysis' if not analysis else 'Not relevant'})")
+            except tweepy.TooManyRequests:
+                # Specific handling for rate limit errors
+                rate_limit_errors += 1
+                error_count += 1
+                logger.warning(f"Rate limit error for {screen_name}. Total rate limit errors: {rate_limit_errors}/{max_rate_limit_errors}")
+                # Add an additional delay after hitting rate limit
+                await asyncio.sleep(random.uniform(5, 10))
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Twitter check error for {screen_name}: {e}", exc_info=True)
+                
+        # Save processed IDs after each tweet check
+        save_processed_ids(stats.processed_news_ids, stats.processed_tweet_ids)
+        
+        elapsed_time = (datetime.now(timezone.utc) - start_time).total_seconds()
+        logger.info(f"Tweet check completed in {elapsed_time:.2f} seconds. Processed {processed_count} tweets.")
+    except Exception as e:
+        logger.error(f"Critical error in tweet check process: {e}", exc_info=True)
 
 async def check_news():
     """
@@ -120,7 +169,7 @@ async def check_news():
     
     try:
         for category in categories:
-            recent_news = finnhub_api.get_recent_news(category, minutes=5)
+            recent_news = finnhub_api.get_recent_news(category, minutes=60)
             
             if not recent_news:
                 continue
@@ -163,12 +212,45 @@ async def main_async():
     if not await telegram_api.test_connection():
         logger.error("Telegram connection test failed. Exiting.")
         return 1
+        
+    # Log available commands
+    logger.info("Available Telegram commands: /stats")
+    from telegram import BotCommand
+    await application.bot.set_my_commands([BotCommand("stats", "Display monitoring statistics")])
     
-    # Initialize the scheduler
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_tweets, 'interval', minutes=30)
-    scheduler.add_job(check_news, 'interval', minutes=5)
+    # Initialize the scheduler with misfire handling
+    scheduler = AsyncIOScheduler(
+        job_defaults={
+            'coalesce': True,  # Combine multiple missed executions into one
+            'max_instances': 1,  # Only allow one instance of each job to run at a time
+            'misfire_grace_time': 60  # Allow jobs to be executed up to 60 seconds late
+        }
+    )
+    
+    # Add event listeners for scheduler events
+    def job_executed_event(event):
+        logger.info(f"Job '{event.job_id}' executed successfully")
+        
+    def job_error_event(event):
+        logger.error(f"Job '{event.job_id}' raised an exception: {event.exception}")
+        logger.error(f"Traceback: {event.traceback}")
+        
+    def job_missed_event(event):
+        logger.warning(f"Job '{event.job_id}' missed its execution time")
+        
+    scheduler.add_listener(job_executed_event, EVENT_JOB_EXECUTED)
+    scheduler.add_listener(job_error_event, EVENT_JOB_ERROR)
+    scheduler.add_listener(job_missed_event, EVENT_JOB_MISSED)
+    
+    # Add jobs with IDs for better tracking
+    scheduler.add_job(check_tweets, 'interval', minutes=30, id='check_tweets')
+    scheduler.add_job(check_news, 'interval', minutes=5, id='check_news')  # Hit Finnhub API every 5 minutes
     scheduler.start()
+    
+    # Run jobs immediately after startup to verify they're working
+    logger.info("Running initial checks...")
+    asyncio.create_task(check_tweets())  # Run tweet check immediately
+    asyncio.create_task(check_news())    # Run news check immediately
     
     # Start the application without blocking
     await application.initialize()

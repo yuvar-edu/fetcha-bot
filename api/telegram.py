@@ -41,21 +41,33 @@ class TelegramAPI:
             update: Telegram update object
             context: Telegram context object
         """
-        message = (
-            f"📊 *Monitoring Statistics*\n"
-            f"```\n"
-            f"Tweets Processed: {stats.tweets_processed}\n"
-            f"Tweets Relevant: {stats.tweets_relevant}\n"
-            f"News Processed: {stats.news_processed}\n"
-            f"News Relevant: {stats.news_relevant}\n"
-            f"Last Tweet Check: {stats.last_tweet_check.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            f"Last News Check: {stats.last_news_check.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            f"```"
-        )
-        await update.message.reply_text(
-            text=message,
-            parse_mode=constants.ParseMode.MARKDOWN_V2
-        )
+        try:
+            # Format dates with proper error handling
+            last_tweet_check = stats.last_tweet_check.strftime('%Y-%m-%d %H:%M:%S UTC') if stats.last_tweet_check else "Never"
+            last_news_check = stats.last_news_check.strftime('%Y-%m-%d %H:%M:%S UTC') if stats.last_news_check else "Never"
+            
+            message = (
+                f"📊 *Monitoring Statistics*\n"
+                f"```\n"
+                f"Tweets Processed: {stats.tweets_processed}\n"
+                f"Tweets Relevant: {stats.tweets_relevant}\n"
+                f"News Processed: {stats.news_processed}\n"
+                f"News Relevant: {stats.news_relevant}\n"
+                f"Last Tweet Check: {last_tweet_check}\n"
+                f"Last News Check: {last_news_check}\n"
+                f"```"
+            )
+            await update.message.reply_text(
+                text=message,
+                parse_mode=constants.ParseMode.MARKDOWN_V2
+            )
+            self.logger.info(f"Stats command executed by {update.effective_user.username}")
+        except Exception as e:
+            self.logger.error(f"Error executing stats command: {e}", exc_info=True)
+            await update.message.reply_text(
+                text="Sorry, there was an error retrieving statistics. Please check the logs.",
+                parse_mode=constants.ParseMode.MARKDOWN_V2
+            )
     
     async def send_tweet_alert(self, screen_name: str, tweet_text: str, tweet_id: str, analysis: Dict[str, Any]):
         """
@@ -82,7 +94,7 @@ class TelegramAPI:
             safe_score_text = escape_markdown(score_text, version=2)
 
             message = (
-                f"🚨 Market Alert\n"
+                f"🚨 Influencer Alert\n"
                 f"👤 {safe_screen_name}\n"
                 f"💬 {safe_text}\n\n"
                 f"📈 Sentiment: {safe_sentiment} \\({safe_score_text}\\)\n"
