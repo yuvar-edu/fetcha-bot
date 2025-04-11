@@ -59,8 +59,12 @@ except Exception as e:
 influencers = [
     'elonmusk', 'michaelsaylor', 'CathieDWood', 'brian_armstrong',
     'cz_binance', 'VitalikButerin', 'APompliano', 'RaoulGMI',
-    'chamath', 'garyvee', 'realDonaldTrump'
+    'chamath',  'realDonaldTrump'
 ]
+
+# Track which influencers have been checked in the current cycle
+last_checked_cycle = 0  # Track which 30-minute cycle we're in
+influencers_checked_this_cycle = set()  # Track which influencers were checked in current cycle
 
 # Load user IDs and processed IDs
 user_id_map = load_user_ids()
@@ -71,94 +75,157 @@ stats.processed_tweet_ids = processed_ids['tweets']
 # Resolve user IDs for influencers
 user_id_map = twitter_api.resolve_user_ids(influencers, user_id_map)
 
-async def check_tweets():
+async def process_influencer_tweets(screen_name, user_id):
     """
-    Check for new tweets from influencers and process them.
+    Process tweets for a single influencer.
+    
+    Args:
+        screen_name: Twitter screen name
+        user_id: Twitter user ID
+        
+    Returns:
+        Tuple of (processed_count, error_occurred, rate_limit_hit)
     """
+    processed_count = 0
+    try:
+        logger.info(f"Checking tweets for {screen_name} (ID: {user_id})")
+        tweets = twitter_api.get_recent_tweets(user_id, minutes=60)
+        logger.info(f"Found {len(tweets)} tweets for {screen_name}")
+        
+        if not tweets:
+            return 0, False, False
+            
+        for tweet in tweets:
+            # Skip already processed tweets
+            if str(tweet['id']) in stats.processed_tweet_ids:
+                logger.debug(f"Skipping already processed tweet {tweet['id']} from {screen_name}")
+                continue
+                
+            # Add to processed set
+            stats.processed_tweet_ids.add(str(tweet['id']))
+            stats.tweets_processed += 1
+            processed_count += 1
+            
+            logger.debug(f"Processing tweet {tweet['id']} from {screen_name}")
+            analysis = await analysis_api.analyze_text(tweet['text'])
+
+            # Only process if analysis exists and relevant flag is True
+            if analysis and analysis.get('relevant', False):
+                stats.tweets_relevant += 1
+                await telegram_api.send_tweet_alert(
+                    screen_name=screen_name,
+                    tweet_text=tweet['text'],
+                    tweet_id=str(tweet['id']),
+                    analysis=analysis
+                )
+            else:
+                logger.debug(f"Irrelevant tweet skipped: {tweet['id']} (Reason: {'No analysis' if not analysis else 'Not relevant'})")
+                
+        return processed_count, False, False
+    except tweepy.TooManyRequests:
+        logger.warning(f"Rate limit error for {screen_name}")
+        return processed_count, True, True
+    except Exception as e:
+        logger.error(f"Twitter check error for {screen_name}: {e}", exc_info=True)
+        return processed_count, True, False
+
+async def check_tweets_staggered():
+    """
+    Check tweets for a subset of influencers in a staggered manner.
+    This function is called more frequently but processes fewer influencers each time.
+    """
+    global last_checked_cycle, influencers_checked_this_cycle
+    
+    # Calculate current 30-minute cycle (0-5 for 6 cycles per 30 minutes)
+    current_time = datetime.now(timezone.utc)
+    current_cycle = (current_time.hour * 60 + current_time.minute) // 5 % 6
+    
+    # If we've moved to a new 30-minute cycle, reset the tracking
+    if current_cycle == 0 and last_checked_cycle == 5:
+        influencers_checked_this_cycle.clear()
+        logger.info("Starting new 30-minute tweet check cycle")
+    
+    # Update the last checked cycle
+    last_checked_cycle = current_cycle
+    
+    # If all influencers have been checked this cycle, we're done
+    if len(influencers_checked_this_cycle) >= len(user_id_map):
+        logger.debug("All influencers already checked in this 30-minute cycle")
+        return
+    
     start_time = datetime.now(timezone.utc)
     stats.last_tweet_check = start_time
-    logger.info("Starting tweet check process")
+    logger.info(f"Starting staggered tweet check (cycle {current_cycle+1}/6)")
     
     # Process tweets in batches to avoid long-running operations
     processed_count = 0
     error_count = 0
-    max_errors = 3  # Maximum number of consecutive errors before aborting
+    max_errors = 2  # Maximum number of consecutive errors before aborting
     rate_limit_errors = 0
-    max_rate_limit_errors = 5  # Maximum number of rate limit errors before backing off
+    max_rate_limit_errors = 3  # Maximum number of rate limit errors before backing off
     
     try:
-        # Randomize the order of influencers to distribute API calls
-        import random
-        influencer_items = list(user_id_map.items())
-        random.shuffle(influencer_items)
+        # Get influencers that haven't been checked in this cycle
+        remaining_influencers = [(name, id) for name, id in user_id_map.items() 
+                                if name not in influencers_checked_this_cycle]
         
-        for screen_name, user_id in influencer_items:
+        # Randomize the order to distribute API calls more evenly
+        import random
+        random.shuffle(remaining_influencers)
+        
+        # Calculate how many influencers to check in this cycle
+        # We want to distribute checks evenly across the 6 cycles
+        influencers_per_cycle = max(1, len(remaining_influencers) // (6 - current_cycle))
+        influencers_to_check = remaining_influencers[:influencers_per_cycle]
+        
+        logger.info(f"Checking {len(influencers_to_check)} influencers in this cycle")
+        
+        for screen_name, user_id in influencers_to_check:
             if error_count >= max_errors:
-                logger.warning(f"Aborting tweet check after {error_count} consecutive errors")
+                logger.warning(f"Aborting staggered tweet check after {error_count} consecutive errors")
                 break
                 
             if rate_limit_errors >= max_rate_limit_errors:
                 logger.warning(f"Rate limit threshold reached ({rate_limit_errors} errors). Pausing tweet check for this cycle.")
                 break
-                
-            try:
-                # Add a variable delay between API calls to different influencers to avoid rate limiting
-                # Longer delay as we process more influencers
-                delay = random.uniform(3, 6)  # Random delay between 3-6 seconds
-                logger.debug(f"Waiting {delay:.1f}s before checking tweets for {screen_name}")
-                await asyncio.sleep(delay)
-                
-                logger.info(f"Checking tweets for {screen_name} (ID: {user_id})")
-                tweets = twitter_api.get_recent_tweets(user_id, minutes=60)
-                logger.info(f"Found {len(tweets)} tweets for {screen_name}")
+            
+            # Add a variable delay between API calls to different influencers to avoid rate limiting
+            delay = random.uniform(2, 4)  # Shorter delay for staggered checks
+            logger.debug(f"Waiting {delay:.1f}s before checking tweets for {screen_name}")
+            await asyncio.sleep(delay)
+            
+            # Process tweets for this influencer
+            influencer_processed, error_occurred, rate_limit_hit = await process_influencer_tweets(screen_name, user_id)
+            processed_count += influencer_processed
+            
+            # Mark this influencer as checked in this cycle
+            influencers_checked_this_cycle.add(screen_name)
+            
+            # Handle errors
+            if error_occurred:
+                error_count += 1
+                if rate_limit_hit:
+                    rate_limit_errors += 1
+                    # Add an additional delay after hitting rate limit
+                    await asyncio.sleep(random.uniform(5, 10))
+            else:
                 error_count = 0  # Reset error count on success
-
-                if not tweets:
-                    continue
-
-                for tweet in tweets:
-                    # Skip already processed tweets
-                    if str(tweet['id']) in stats.processed_tweet_ids:
-                        logger.debug(f"Skipping already processed tweet {tweet['id']} from {screen_name}")
-                        continue
-                        
-                    # Add to processed set
-                    stats.processed_tweet_ids.add(str(tweet['id']))
-                    stats.tweets_processed += 1
-                    processed_count += 1
-                    
-                    logger.debug(f"Processing tweet {tweet['id']} from {screen_name}")
-                    analysis = await analysis_api.analyze_text(tweet['text'])
-
-                    # Only process if analysis exists and relevant flag is True
-                    if analysis and analysis.get('relevant', False):
-                        stats.tweets_relevant += 1
-                        await telegram_api.send_tweet_alert(
-                            screen_name=screen_name,
-                            tweet_text=tweet['text'],
-                            tweet_id=str(tweet['id']),
-                            analysis=analysis
-                        )
-                    else:
-                        logger.debug(f"Irrelevant tweet skipped: {tweet['id']} (Reason: {'No analysis' if not analysis else 'Not relevant'})")
-            except tweepy.TooManyRequests:
-                # Specific handling for rate limit errors
-                rate_limit_errors += 1
-                error_count += 1
-                logger.warning(f"Rate limit error for {screen_name}. Total rate limit errors: {rate_limit_errors}/{max_rate_limit_errors}")
-                # Add an additional delay after hitting rate limit
-                await asyncio.sleep(random.uniform(5, 10))
-            except Exception as e:
-                error_count += 1
-                logger.error(f"Twitter check error for {screen_name}: {e}", exc_info=True)
-                
+        
         # Save processed IDs after each tweet check
         save_processed_ids(stats.processed_news_ids, stats.processed_tweet_ids)
         
         elapsed_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-        logger.info(f"Tweet check completed in {elapsed_time:.2f} seconds. Processed {processed_count} tweets.")
+        logger.info(f"Staggered tweet check completed in {elapsed_time:.2f} seconds. Processed {processed_count} tweets.")
+        logger.info(f"Influencers checked this cycle: {len(influencers_checked_this_cycle)}/{len(user_id_map)}")
     except Exception as e:
-        logger.error(f"Critical error in tweet check process: {e}", exc_info=True)
+        logger.error(f"Critical error in staggered tweet check process: {e}", exc_info=True)
+
+async def check_tweets():
+    """
+    Legacy full tweet check function - now just calls the staggered version.
+    Kept for backward compatibility.
+    """
+    await check_tweets_staggered()
 
 async def check_news():
     """
@@ -243,13 +310,13 @@ async def main_async():
     scheduler.add_listener(job_missed_event, EVENT_JOB_MISSED)
     
     # Add jobs with IDs for better tracking
-    scheduler.add_job(check_tweets, 'interval', minutes=30, id='check_tweets')
+    scheduler.add_job(check_tweets_staggered, 'interval', minutes=5, id='check_tweets_staggered')  # Staggered tweet checks every 5 minutes
     scheduler.add_job(check_news, 'interval', minutes=5, id='check_news')  # Hit Finnhub API every 5 minutes
     scheduler.start()
     
     # Run jobs immediately after startup to verify they're working
     logger.info("Running initial checks...")
-    asyncio.create_task(check_tweets())  # Run tweet check immediately
+    asyncio.create_task(check_tweets_staggered())  # Run staggered tweet check immediately
     asyncio.create_task(check_news())    # Run news check immediately
     
     # Start the application without blocking
